@@ -1,0 +1,6 @@
+{
+  "name": "智能微网",
+  "description": "TrinaPower 天合富家智能微网与虚拟电厂控制调度平台，包含站点管理、需求响应、策略排期运行以及虚拟电厂邀约对接系统。",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
