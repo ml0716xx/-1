@@ -5,6 +5,7 @@
 
 export enum VppStatus {
   PENDING_CONFIRM = "待确认",
+  CONFIRMING = "确认中",
   AGREED = "已同意",
   REJECTED = "已拒绝",
   EXPIRED = "已过期",
@@ -45,6 +46,9 @@ export interface VppInvitation {
   settlementRevenue?: number; // 结算收益 (元)
   remark?: string;
   createTime: string;
+  declaredCapacity?: number; // 用户申报可参与容量 (kW)
+  declaredPrice?: number; // 用户申报报价 (元/kWh)
+  intervalDeclarations?: { timeslot: string; capacity: number; price: number; }[];
 }
 
 export interface DrPlan {

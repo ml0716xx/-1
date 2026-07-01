@@ -8,6 +8,7 @@ import {
   Plus, 
   Search, 
   RotateCcw, 
+  RefreshCw,
   Check, 
   X, 
   AlertTriangle, 
@@ -49,14 +50,22 @@ export default function DemandResponse({
   // Current Subtab
   const [subTab, setSubTab] = useState<"plans" | "vpp">("plans");
 
+  // Helper to format timeslot for table display matching the image (e.g. "14:00-14:15" -> "14:15")
+  const getDisplayTimeslot = (timeslot: string): string => {
+    if (timeslot.includes("-")) {
+      return timeslot.split("-")[1];
+    }
+    return timeslot;
+  };
+
   // Plan search state
   const [searchPlanName, setSearchPlanName] = useState("");
   const [searchDateStart, setSearchDateStart] = useState("");
   const [searchDateEnd, setSearchDateEnd] = useState("");
 
   // VPP filter state
-  const [filterVppSource, setFilterVppSource] = useState("");
   const [filterVppStatus, setFilterVppStatus] = useState("全部");
+  const [intervalDeclarations, setIntervalDeclarations] = useState<{ timeslot: string; capacity: string; price: string; }[]>([]);
 
   // Plan Modal state
   const [showAddPlanModal, setShowAddPlanModal] = useState(false);
@@ -77,6 +86,8 @@ export default function DemandResponse({
   const [selectedVppToConfirm, setSelectedVppToConfirm] = useState<VppInvitation | null>(null);
   const [vppActionType, setVppActionType] = useState<"agree" | "reject" | null>(null);
   const [reasonMsg, setReasonMsg] = useState("");
+  const [declaredCapacity, setDeclaredCapacity] = useState("");
+  const [declaredPrice, setDeclaredPrice] = useState("");
 
   // Feedback Notification Message
   const [toastMessage, setToastMessage] = useState<{ type: "success" | "error" | "warning" | "info"; text: string } | null>(null);
@@ -116,7 +127,6 @@ export default function DemandResponse({
 
   // Filter VPP invitations
   const filteredInvitations = vppInvitations.filter((vpp) => {
-    if (filterVppSource && vpp.source !== filterVppSource) return false;
     if (filterVppStatus !== "全部" && vpp.status !== filterVppStatus) return false;
     return true;
   });
@@ -174,6 +184,35 @@ export default function DemandResponse({
     }
   };
 
+  // Helper: split "HH:mm-HH:mm" into 15-minute intervals
+  const generate15MinIntervals = (responsePeriod: string): string[] => {
+    try {
+      const [startStr, endStr] = responsePeriod.split("-");
+      const [startH, startM] = startStr.split(":").map(Number);
+      const [endH, endM] = endStr.split(":").map(Number);
+      
+      let currentMin = startH * 60 + startM;
+      const endMin = endH * 60 + endM;
+      
+      const intervals: string[] = [];
+      while (currentMin + 15 <= endMin) {
+        const nextMin = currentMin + 15;
+        
+        const formatTime = (min: number) => {
+          const h = Math.floor(min / 60).toString().padStart(2, "0");
+          const m = (min % 60).toString().padStart(2, "0");
+          return `${h}:${m}`;
+        };
+        
+        intervals.push(`${formatTime(currentMin)}-${formatTime(nextMin)}`);
+        currentMin = nextMin;
+      }
+      return intervals;
+    } catch {
+      return [];
+    }
+  };
+
   const resetPlanForm = () => {
     setFormStep(1);
     setFormName("");
@@ -206,30 +245,7 @@ export default function DemandResponse({
     if (!selectedVppToConfirm) return;
     const vpp = selectedVppToConfirm;
 
-    if (vppActionType === "reject") {
-      // Update invitation state
-      setVppInvitations((prev) =>
-        prev.map((item) => (item.id === vpp.id ? { ...item, status: VppStatus.REJECTED } : item))
-      );
-      // Log notification
-      setNotifications((prev) => [
-        {
-          id: "sys_" + Date.now(),
-          title: `已拒绝 VPP 需求响应邀约`,
-          type: "exec_exception",
-          content: `已拒绝 [${vpp.source}] 响应日期 ${vpp.responseDate} 的调度邀约：${reasonMsg || "客户主动拒绝"}。`,
-          timestamp: "2026-06-08 10:45",
-          isRead: false
-        },
-        ...prev
-      ]);
-      triggerToast(`已成功拒绝来自 ${vpp.source} 的需求响应调度邀约`, "warning");
-      setSelectedVppToConfirm(null);
-      setReasonMsg("");
-      return;
-    }
-
-    // AGREE AGREE PROCESS
+    // AGREE/PARTICIPATE PROCESS
     // Step 1: Validate active site has Meter Number (电表户号)
     const meterNoCheck = selectedSite.meterNo ? selectedSite.meterNo.trim() : "";
     if (!meterNoCheck) {
@@ -240,7 +256,173 @@ export default function DemandResponse({
       return;
     }
 
-    // Step 2: Conflict detection (同一站点同一响应时段最多允许一个需求响应执行, VPP 临时策略与手动计划互斥)
+    // Step 2: Validate declared capacity and declared price inputs for each interval
+    for (let i = 0; i < intervalDeclarations.length; i++) {
+      const item = intervalDeclarations[i];
+      const capTrim = item.capacity.trim();
+      const prcTrim = item.price.trim();
+      const hasCap = capTrim !== "";
+      const hasPrc = prcTrim !== "";
+
+      if (hasCap && !hasPrc) {
+        triggerToast(`时段 [${getDisplayTimeslot(item.timeslot)}] 已填写报量，必须填写报价！`, "error");
+        return;
+      }
+      if (!hasCap && hasPrc) {
+        triggerToast(`时段 [${getDisplayTimeslot(item.timeslot)}] 已填写报价，必须填写报量！`, "error");
+        return;
+      }
+
+      if (hasCap && hasPrc) {
+        const capVal = parseFloat(capTrim);
+        const prcVal = parseFloat(prcTrim);
+        if (isNaN(capVal) || capVal <= 0) {
+          triggerToast(`时段 [${getDisplayTimeslot(item.timeslot)}] 的可参与容量请输入大于0的有效数值！`, "error");
+          return;
+        }
+        if (isNaN(prcVal) || prcVal <= 0) {
+          triggerToast(`时段 [${getDisplayTimeslot(item.timeslot)}] 的申报价请输入大于0的有效数值！`, "error");
+          return;
+        }
+        if (prcVal > vpp.subsidyPrice) {
+          triggerToast(`时段 [${getDisplayTimeslot(item.timeslot)}] 的报价不能高于最高限价 ￥${vpp.subsidyPrice.toFixed(2)} 元/kWh！`, "error");
+          return;
+        }
+      }
+    }
+
+    const filledIntervals = intervalDeclarations.filter(
+      item => item.capacity.trim() !== "" && item.price.trim() !== ""
+    );
+
+    if (filledIntervals.length === 0) {
+      triggerToast("请至少填写一个时段的报量与报价！", "error");
+      return;
+    }
+
+    // Calculate averages across filled intervals
+    const sumCap = filledIntervals.reduce((sum, item) => sum + parseFloat(item.capacity), 0);
+    const avgCap = sumCap / filledIntervals.length;
+
+    const sumPrc = filledIntervals.reduce((sum, item) => sum + parseFloat(item.price), 0);
+    const avgPrc = sumPrc / filledIntervals.length;
+
+    const finalIntervals = filledIntervals.map(item => ({
+      timeslot: item.timeslot,
+      capacity: parseFloat(item.capacity),
+      price: parseFloat(item.price)
+    }));
+
+    // Step 3: Conflict detection (同一站点同一响应时段最多允许一个需求响应执行, VPP 临时策略与手动计划互斥)
+    const hasConflict = drPlans.some(
+      (p) =>
+        p.responseDate === vpp.responseDate &&
+        p.status !== "已完成" &&
+        isTimeOverlapping(p.responsePeriod, vpp.responsePeriod)
+    );
+
+    if (hasConflict) {
+      triggerToast(
+        `该时段 [${vpp.responseDate} ${vpp.responsePeriod}] 已存在手动创建的需求响应计划或已有其他 VPP 需求响应任务，无法创建策略任务！`,
+        "error"
+      );
+      return;
+    }
+
+    // Step 4: Move to "CONFIRMING" (确认中) Status
+    setVppInvitations((prev) =>
+      prev.map((item) => (item.id === vpp.id ? { 
+        ...item, 
+        status: VppStatus.CONFIRMING,
+        declaredCapacity: avgCap,
+        declaredPrice: avgPrc,
+        intervalDeclarations: finalIntervals
+      } : item))
+    );
+
+    // Step 5: Raise System Notification
+    setNotifications((prev) => [
+      {
+        id: "sys_dr_confirming_" + Date.now(),
+        title: `需求响应报价报量信息已提交`,
+        type: "invitation_new",
+        content: `针对 ${vpp.responseDate} ${vpp.responsePeriod} 的调度邀约已完成分段报价报量：各时段平均申报容量 ${avgCap.toFixed(1)} kW，平均申报报价 ￥${avgPrc.toFixed(2)}。当前状态为「确认中」，正在等待回调响应...`,
+        timestamp: "2026-06-08 10:41",
+        isRead: false
+      },
+      ...prev
+    ]);
+
+    triggerToast(`报价报量提交成功！邀约状态已变更为「确认中」，请在下方列表中点击「模拟回调成功」模拟电厂回调并下发排程！`, "success");
+    setSelectedVppToConfirm(null);
+  };
+
+  // Reject VPP invitation implementation
+  const handleVppReject = () => {
+    if (!selectedVppToConfirm) return;
+    const vpp = selectedVppToConfirm;
+
+    if (!reasonMsg.trim()) {
+      triggerToast("请填写拒绝原因！", "error");
+      return;
+    }
+
+    // Update invitation state
+    setVppInvitations((prev) =>
+      prev.map((item) => (item.id === vpp.id ? { ...item, status: VppStatus.REJECTED } : item))
+    );
+    // Log notification
+    setNotifications((prev) => [
+      {
+        id: "sys_" + Date.now(),
+        title: `已拒绝需求响应邀约`,
+        type: "exec_exception",
+        content: `已拒绝 响应日期 ${vpp.responseDate} 的调度邀约：${reasonMsg.trim()}。`,
+        timestamp: "2026-06-08 10:45",
+        isRead: false
+      },
+      ...prev
+    ]);
+    triggerToast(`已成功拒绝需求响应调度邀约`, "warning");
+    setSelectedVppToConfirm(null);
+    setReasonMsg("");
+  };
+
+  // Mock receiving the VPP callback response successfully
+  const handleVppCallbackMock = (vpp: VppInvitation) => {
+    // Step 1: Validate active site has Meter Number (电表户号)
+    const meterNoCheck = selectedSite.meterNo ? selectedSite.meterNo.trim() : "";
+    if (!meterNoCheck) {
+      triggerToast(
+        `电表户号无效或该站点 [${selectedSite.name}] 未配置电表户号！无法进行回调确认。`,
+        "error"
+      );
+      return;
+    }
+
+    // Calculate final revenue based on interval declarations
+    let finalRevenue = 0;
+    if (vpp.intervalDeclarations && vpp.intervalDeclarations.length > 0) {
+      finalRevenue = vpp.intervalDeclarations.reduce((sum, item) => sum + item.capacity * item.price * 0.25, 0);
+    } else {
+      const finalCapacity = vpp.declaredCapacity || vpp.targetCapacity;
+      const finalPrice = vpp.declaredPrice || vpp.subsidyPrice;
+      // parse period
+      let hours = 2;
+      try {
+        const [s, e] = vpp.responsePeriod.split("-").map(t => {
+          const [h, m] = t.split(":").map(Number);
+          return h + m / 60;
+        });
+        hours = e - s;
+      } catch {}
+      finalRevenue = finalCapacity * finalPrice * hours;
+    }
+
+    const finalCapacity = vpp.declaredCapacity || vpp.targetCapacity;
+    const finalPrice = vpp.declaredPrice || vpp.subsidyPrice;
+
+    // Step 2: Conflict detection
     const hasConflict = drPlans.some(
       (p) =>
         p.responseDate === vpp.responseDate &&
@@ -257,28 +439,26 @@ export default function DemandResponse({
     }
 
     // Step 3: Success simulations
-    // A. Create the linked DR plan
+    // A. Create the linked DR plan using final capacity and final price
     const newDrPlan: DrPlan = {
       id: "plan_" + Date.now(),
       name: vpp.planName,
       type: DrPlanType.VPP,
       responseDate: vpp.responseDate,
       responsePeriod: vpp.responsePeriod,
-      targetCapacity: vpp.targetCapacity,
+      targetCapacity: finalCapacity,
       baselineAvgLoad: 285.00,
       baselineMaxLoad: 360.00,
       status: "待执行",
       vppInvitationId: vpp.id,
-      meterNo: meterNoCheck
+      meterNo: meterNoCheck,
+      profit: finalRevenue
     };
 
     setDrPlans([newDrPlan, ...drPlans]);
 
     // B. Copy active strategy of today & segment (时段分割)
-    // Create copy strategy group for vppDate
     const originActiveGroup = strategyGroups.find(sg => sg.dateActive === "2026-06-08") || strategyGroups[strategyGroups.length - 1];
-    
-    // Perform split logically
     const [vppStart, vppEnd] = vpp.responsePeriod.split("-");
     
     const splitGroup: StrategyGroup = {
@@ -296,26 +476,29 @@ export default function DemandResponse({
 
     setStrategyGroups([...strategyGroups, splitGroup]);
 
-    // C. Update VppInvitation Status
+    // C. Update VppInvitation Status to AGREED and save actual calculated revenue
     setVppInvitations((prev) =>
-      prev.map((item) => (item.id === vpp.id ? { ...item, status: VppStatus.AGREED } : item))
+      prev.map((item) => (item.id === vpp.id ? { 
+        ...item, 
+        status: VppStatus.AGREED,
+        refRevenue: finalRevenue // Update reference revenue to match new bid
+      } : item))
     );
 
     // D. Raise System Notification
     setNotifications((prev) => [
       {
         id: "sys_dr_confirm_" + Date.now(),
-        title: `需求响应策略任务已创建并下发`,
+        title: `调度回调确认通过`,
         type: "strategy_created",
-        content: `需求响应临时策略组 [${splitGroup.name}] 已下发，将于 ${vpp.responseDate} ${vpp.responsePeriod} 自动执行并覆盖原策略，全程不修改您的原始基准策略配置。`,
+        content: `虚拟电厂已回调确认通过报量（申报容量: ${finalCapacity.toFixed(1)} kW，申报单价: ￥${finalPrice.toFixed(2)}/kWh）。需求响应策略 [${splitGroup.name}] 已成功下发，将于 ${vpp.responseDate} ${vpp.responsePeriod} 覆盖原策略。`,
         timestamp: "2026-06-08 10:43",
         isRead: false
       },
       ...prev
     ]);
 
-    triggerToast(`同意成功！已根据您电表户号 [${meterNoCheck}] 自动完成原策略的时段分割与最高优先级VPP策略编排，将自动下发至 EMS！`, "success");
-    setSelectedVppToConfirm(null);
+    triggerToast(`虚拟电厂回调响应确认成功！已根据您的报量报价完成原策略时段分割与VPP策略编排！`, "success");
   };
 
   return (
@@ -559,20 +742,6 @@ export default function DemandResponse({
           {/* VPP Invitation View filters */}
           <div className="bg-white p-5 rounded-xl border border-gray-100 shadow-sm flex flex-wrap items-center gap-4 text-xs">
             <div className="flex flex-col space-y-1 min-w-[150px]">
-              <label className="text-gray-500 font-medium">邀约来源</label>
-              <select 
-                value={filterVppSource}
-                onChange={(e) => setFilterVppSource(e.target.value)}
-                className="border border-gray-200 rounded-md px-3 py-1.5 focus:border-teal-500 focus:outline-none"
-              >
-                <option value="">全部 VPP 平台</option>
-                <option value="南方电网 VPP">南方电网 VPP</option>
-                <option value="华东电力调峰 VPP">华东电力调峰 VPP</option>
-                <option value="国网湖北电力 VPP">国网湖北电力 VPP</option>
-              </select>
-            </div>
-
-            <div className="flex flex-col space-y-1 min-w-[150px]">
               <label className="text-gray-500 font-medium">状态筛选</label>
               <select 
                 value={filterVppStatus}
@@ -614,7 +783,6 @@ export default function DemandResponse({
                 <thead>
                   <tr className="bg-gray-50 text-gray-500 font-medium border-b border-gray-100">
                     <th className="py-3 px-4">邀约 ID</th>
-                    <th className="py-3 px-4">邀约来源</th>
                     <th className="py-3 px-4">计划名称</th>
                     <th className="py-3 px-4">响应日期</th>
                     <th className="py-3 px-4">响应时段</th>
@@ -623,9 +791,6 @@ export default function DemandResponse({
                     <th className="py-3 px-4 text-right">预估/参考收益</th>
                     <th className="py-3 px-4 text-center">截止确认</th>
                     <th className="py-3 px-4 text-center">状态</th>
-                    <th className="py-3 px-4 text-right">实际响应 (kW)</th>
-                    <th className="py-3 px-4 text-right">响应效率 (%)</th>
-                    <th className="py-3 px-4 text-right">结算费用</th>
                     <th className="py-3 px-4 text-center">调度操作</th>
                   </tr>
                 </thead>
@@ -636,12 +801,6 @@ export default function DemandResponse({
                     return (
                       <tr key={vpp.id} className="hover:bg-gray-50/50 transition">
                         <td className="py-3.5 px-4 font-mono font-bold text-gray-500">{vpp.id}</td>
-                        <td className="py-3.5 px-4">
-                          <span className="flex items-center space-x-1 font-semibold text-gray-950">
-                            <span className="w-1.5 h-1.5 rounded-full bg-teal-500" />
-                            <span>{vpp.source}</span>
-                          </span>
-                        </td>
                         <td className="py-3.5 px-4 max-w-[180px] truncate" title={vpp.planName}>{vpp.planName}</td>
                         <td className="py-3.5 px-4 font-mono">{vpp.responseDate}</td>
                         <td className="py-3.5 px-4 font-mono">{vpp.responsePeriod}</td>
@@ -653,6 +812,8 @@ export default function DemandResponse({
                           <span className={`px-2 py-0.5 rounded text-[10px] font-semibold ${
                             vpp.status === VppStatus.PENDING_CONFIRM 
                               ? "bg-orange-50 text-orange-700 border border-orange-100 animate-pulse" 
+                            : vpp.status === VppStatus.CONFIRMING
+                              ? "bg-blue-50 text-blue-700 border border-blue-100 font-bold"
                               : vpp.status === VppStatus.AGREED
                               ? "bg-teal-50 text-teal-700 border border-teal-100"
                               : vpp.status === VppStatus.REJECTED
@@ -664,33 +825,53 @@ export default function DemandResponse({
                             {vpp.status}
                           </span>
                         </td>
-                        <td className="py-3.5 px-4 text-right font-mono">{vpp.actualCapacity !== undefined ? vpp.actualCapacity.toFixed(2) : "--"}</td>
-                        <td className="py-3.5 px-4 text-right font-mono font-semibold">
-                          {vpp.efficiency !== undefined ? `${vpp.efficiency.toFixed(1)}%` : "--"}
-                        </td>
-                        <td className="py-3.5 px-4 text-right font-mono text-amber-700 font-bold">
-                          {vpp.settlementRevenue !== undefined ? `￥${vpp.settlementRevenue.toFixed(2)}` : "--"}
-                        </td>
                         <td className="py-3.5 px-4 text-center">
-                          {isPending ? (
+                          {vpp.status === VppStatus.PENDING_CONFIRM ? (
                             <div className="flex items-center justify-center space-x-1.5">
                               <button 
                                 onClick={() => {
-                                  setVppActionType("agree");
                                   setSelectedVppToConfirm(vpp);
+                                  setDeclaredCapacity(vpp.targetCapacity.toString());
+                                  setDeclaredPrice(vpp.subsidyPrice.toString());
+                                  const intervals = generate15MinIntervals(vpp.responsePeriod);
+                                  setIntervalDeclarations(intervals.map(t => ({
+                                    timeslot: t,
+                                    capacity: vpp.targetCapacity.toString(),
+                                    price: vpp.subsidyPrice.toString()
+                                  })));
+                                  setReasonMsg("");
                                 }}
-                                className="bg-teal-600 hover:bg-teal-700 text-white font-bold px-2 py-1 rounded text-[10px] shadow-sm cursor-pointer"
+                                className="bg-teal-600 hover:bg-teal-700 text-white font-bold px-3 py-1 rounded-lg text-[10px] shadow-sm cursor-pointer transition duration-150"
                               >
-                                同意参与
+                                参与
                               </button>
                               <button 
                                 onClick={() => {
-                                  setVppActionType("reject");
                                   setSelectedVppToConfirm(vpp);
+                                  setDeclaredCapacity(vpp.targetCapacity.toString());
+                                  setDeclaredPrice(vpp.subsidyPrice.toString());
+                                  const intervals = generate15MinIntervals(vpp.responsePeriod);
+                                  setIntervalDeclarations(intervals.map(t => ({
+                                    timeslot: t,
+                                    capacity: vpp.targetCapacity.toString(),
+                                    price: vpp.subsidyPrice.toString()
+                                  })));
+                                  setReasonMsg("");
                                 }}
                                 className="bg-white border border-gray-200 hover:bg-rose-50 hover:text-rose-700 text-gray-600 px-2 py-1 rounded text-[10px] cursor-pointer"
                               >
                                 拒绝
+                              </button>
+                            </div>
+                          ) : vpp.status === VppStatus.CONFIRMING ? (
+                            <div className="flex items-center justify-center">
+                              <button 
+                                onClick={() => handleVppCallbackMock(vpp)}
+                                className="bg-blue-600 hover:bg-blue-750 text-white font-bold px-2.5 py-1 rounded-md text-[10px] shadow-sm cursor-pointer flex items-center space-x-1 animate-pulse"
+                                title="点击模拟外部电网对本次报量报价发出最终的回调批准，自动分割并下发执行策略"
+                              >
+                                <RefreshCw className="w-3 h-3 animate-spin" />
+                                <span>模拟回调成功</span>
                               </button>
                             </div>
                           ) : (
@@ -821,7 +1002,6 @@ export default function DemandResponse({
                       />
                     </div>
                   </div>
-
                   <div className="flex flex-col space-y-1">
                     <label className="text-gray-600 font-bold flex items-center">
                       <span className="text-rose-500 mr-1">*</span>目标响应容量 (kW)
@@ -837,7 +1017,7 @@ export default function DemandResponse({
 
                   <div className="flex flex-col space-y-1 col-span-2">
                     <label className="text-gray-600 font-bold flex items-center">
-                      <span className="text-rose-500 mr-1">*</span>补贴价格 (元/kW)
+                      <span className="text-rose-500 mr-1">*</span>补贴价格 (元/kWh)
                     </label>
                     <input 
                       type="number" 
@@ -873,17 +1053,17 @@ export default function DemandResponse({
                     </div>
                     <div className="flex justify-between border-b border-gray-50 pb-1.5 pl-4">
                       <span className="text-gray-400">响应日期</span>
-                      <span className="text-gray-800 font-mono">{formDate}</span>
+                      <span className="text-gray-850 font-mono">{formDate}</span>
                     </div>
                     <div className="flex justify-between border-b border-gray-50 pb-1.5">
                       <span className="text-gray-400">响应时间段</span>
-                      <span className="text-gray-800 font-mono">{formStartTime} - {formEndTime}</span>
+                      <span className="text-gray-850 font-mono">{formStartTime} - {formEndTime}</span>
                     </div>
                     <div className="flex justify-between border-b border-gray-50 pb-1.5 pl-4">
                       <span className="text-gray-400">目标削峰负荷</span>
                       <span className="text-teal-700 font-bold font-mono">{formCapacity} kW</span>
                     </div>
-                    <div className="flex justify-between border-b border-gray-50 pb-1.5">
+                    <div className="flex justify-between border-b border-gray-50 pb-1.5 col-span-2">
                       <span className="text-gray-400">补贴单价 / 预估参考收益</span>
                       <span className="text-amber-700 font-bold">
                         ￥{parseFloat(formPrice || "0").toFixed(2)} 元/kWh 
@@ -892,7 +1072,7 @@ export default function DemandResponse({
                         </span>
                       </span>
                     </div>
-                    <div className="flex justify-between border-b border-gray-50 pb-1.5 pl-4">
+                    <div className="flex justify-between border-b border-gray-50 pb-1.5 pl-4 col-span-2">
                       <span className="text-gray-400">目标执行宿主</span>
                       <span className="text-gray-800">{selectedSite.name}</span>
                     </div>
@@ -906,7 +1086,7 @@ export default function DemandResponse({
               {formStep === 2 && (
                 <button
                   onClick={() => setFormStep(1)}
-                  className="bg-white border border-gray-200 text-gray-600 px-4 py-2 rounded-lg text-xs transition"
+                  className="bg-white border border-gray-200 text-gray-600 px-4 py-2 rounded-lg text-xs transition animate-fade-in"
                 >
                   上一步
                 </button>
@@ -932,96 +1112,126 @@ export default function DemandResponse({
       {selectedVppToConfirm && (
         <div className="fixed inset-0 bg-gray-900/40 backdrop-blur-xs flex items-center justify-center z-50 animate-fade-in font-sans">
           <div className="bg-white rounded-xl shadow-2xl border border-gray-100 w-full max-w-md overflow-hidden">
-            {vppActionType === "agree" ? (
-              <>
-                <div className="p-4 border-b border-gray-100 flex items-center space-x-2 text-teal-800 bg-teal-50/50">
-                  <CheckCircle2 className="w-5 h-5 text-teal-600" />
-                  <span className="font-bold font-sans">二次确认参与 VPP 调度邀约</span>
+            <div className="p-4 border-b border-gray-100 flex items-center space-x-2 text-teal-850 bg-teal-50/50">
+              <CheckCircle2 className="w-5 h-5 text-teal-600" />
+              <span className="font-bold font-sans text-sm text-teal-900">处理需求响应邀约（报价报量 / 拒绝）</span>
+            </div>
+            <div className="p-5 space-y-4 text-xs font-sans">
+              {/* Subtitle Info */}
+              <div className="flex flex-wrap justify-between items-center text-[10.5px] text-gray-500 bg-gray-50/70 p-2.5 rounded-lg border border-gray-100 gap-y-1">
+                <div>
+                  <span className="text-gray-400">响应日期：</span>
+                  <span className="font-bold text-gray-700">{selectedVppToConfirm.responseDate}</span>
                 </div>
-                <div className="p-5 space-y-3.5 text-xs">
-                  <p className="text-gray-600 leading-relaxed font-medium font-sans">
-                    确认参与此需求响应邀约？系统将自动针对这一天正在施行的模板做出
-                    <strong className="text-gray-900 font-bold bg-amber-50 px-1 py-0.5 rounded border border-amber-100 mx-0.5">时段分割与优先级覆盖</strong>：
-                  </p>
-                  
-                  <div className="bg-gray-50 rounded-lg p-3 space-y-2 border border-gray-100 font-medium">
-                    <div className="flex justify-between">
-                      <span className="text-gray-400">调度来源</span>
-                      <span className="text-gray-800 font-bold">{selectedVppToConfirm.source}</span>
-                    </div>
-                    <div className="flex justify-between">
-                      <span className="text-gray-400">响应日期时间</span>
-                      <span className="text-gray-800 font-semibold">{selectedVppToConfirm.responseDate}《{selectedVppToConfirm.responsePeriod}》</span>
-                    </div>
-                    <div className="flex justify-between">
-                      <span className="text-gray-400">电表户号 (充当关联ID)</span>
-                      <span className="text-indigo-800 font-mono font-bold">
-                        {selectedSite.meterNo ? selectedSite.meterNo : `【无！请前往站点维护】`}
-                      </span>
-                    </div>
-                    <div className="flex justify-between">
-                      <span className="text-gray-400">目标容量</span>
-                      <span className="text-teal-700 font-bold font-mono">{selectedVppToConfirm.targetCapacity} kW</span>
-                    </div>
-                    <div className="flex justify-between">
-                      <span className="text-gray-400">预估参考收益</span>
-                      <span className="text-amber-800 font-bold font-mono">￥{selectedVppToConfirm.refRevenue.toFixed(2)} 元</span>
-                    </div>
-                  </div>
+                <div>
+                  <span className="text-gray-400">电表户号：</span>
+                  <span className="font-mono font-bold text-indigo-700">
+                    {selectedSite.meterNo ? selectedSite.meterNo : `【未配置】`}
+                  </span>
+                </div>
+              </div>
 
-                  <p className="text-[10px] text-gray-400 p-2 border-l-2 border-teal-500 bg-teal-50/30">
-                    * 同意后立刻生成最高级需求响应策略并自动覆盖重叠时段。微网系统与第三方VPP平台具有法律契约责任，同意后生成计划将锁定在系统中，由EMS全过程自动接管。
-                  </p>
+              {/* Top summary row */}
+              <div className="flex justify-between items-center px-1 text-xs">
+                <div className="flex items-center space-x-1">
+                  <span className="text-gray-600 font-medium">总响应容量：</span>
+                  <span className="font-mono font-bold text-teal-700 text-sm">{selectedVppToConfirm.targetCapacity.toFixed(2)} kW</span>
                 </div>
-                <div className="p-3 border-t border-gray-100 flex justify-end space-x-1.5 bg-gray-50/30">
-                  <button 
-                    onClick={() => setSelectedVppToConfirm(null)}
-                    className="bg-white border border-gray-200 text-gray-500 hover:bg-gray-100 px-3.5 py-1.5 rounded-lg text-[11px] font-semibold cursor-pointer"
-                  >
-                    再想想
-                  </button>
-                  <button 
-                    onClick={handleVppActionConfirm}
-                    className="bg-teal-600 hover:bg-teal-700 text-white font-bold px-3.5 py-1.5 rounded-lg text-[11px] shadow-sm cursor-pointer"
-                  >
-                    确认调度并推送
-                  </button>
+                <div className="flex items-center space-x-1">
+                  <span className="text-gray-600 font-medium">最高限价：</span>
+                  <span className="font-mono font-bold text-amber-700 text-sm">￥{selectedVppToConfirm.subsidyPrice.toFixed(2)} / kWh</span>
                 </div>
-              </>
-            ) : (
-              <>
-                <div className="p-4 border-b border-gray-100 flex items-center space-x-2 text-rose-800 bg-rose-50/50">
-                  <AlertTriangle className="w-5 h-5 text-rose-600" />
-                  <span className="font-bold">确认拒绝 VPP 需求响应邀约？</span>
-                </div>
-                <div className="p-5 space-y-3.5 text-xs">
-                  <p className="text-gray-600 leading-relaxed font-sans">
-                    拒绝邀约后，系统将正式反馈第三方调度平台。请填写反馈拒绝理由（由VPP平台进行合同额度调优）：
-                  </p>
-                  <textarea 
-                    value={reasonMsg}
-                    onChange={(e) => setReasonMsg(e.target.value)}
-                    placeholder="例如：储能备电SOC故障、站内当前负荷处于极端峰值区间..."
-                    rows={3}
-                    className="w-full border border-gray-200 rounded-md p-2 text-xs focus:ring-0 focus:outline-none focus:border-rose-500"
-                  />
-                </div>
-                <div className="p-3 border-t border-gray-100 flex justify-end space-x-1.5 bg-gray-50/30">
-                  <button 
-                    onClick={() => setSelectedVppToConfirm(null)}
-                    className="bg-white border border-gray-200 text-gray-500 hover:bg-gray-100 px-3.5 py-1.5 rounded-lg text-[11px] font-semibold cursor-pointer"
-                  >
-                    取消
-                  </button>
-                  <button 
-                    onClick={handleVppActionConfirm}
-                    className="bg-rose-600 hover:bg-rose-700 text-white font-bold px-3.5 py-1.5 rounded-lg text-[11px] shadow-sm cursor-pointer"
-                  >
-                    确认拒绝该邀约
-                  </button>
-                </div>
-              </>
-            )}
+              </div>
+
+              {/* Clean Grid-based Table */}
+              <div className="border border-gray-200 rounded-lg overflow-hidden bg-white">
+                <table className="w-full text-left border-collapse">
+                  <thead>
+                    <tr className="bg-gray-50 text-[11px] font-bold text-gray-600 border-b border-gray-200">
+                      <th className="py-2.5 px-3 border-r border-gray-200 text-center w-1/3">时间段</th>
+                      <th className="py-2.5 px-3 border-r border-gray-200 text-center w-1/3">报量</th>
+                      <th className="py-2.5 px-3 text-center w-1/3">报价</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {intervalDeclarations.map((item, idx) => (
+                      <tr key={item.timeslot} className="border-b border-gray-150 last:border-b-0 hover:bg-teal-50/10 transition-colors">
+                        <td className="py-2 px-3 border-r border-gray-200 text-center font-mono font-bold text-gray-500 bg-gray-50/20 select-all">
+                          {getDisplayTimeslot(item.timeslot)}
+                        </td>
+                        <td className="py-1 px-2 border-r border-gray-200">
+                          <div className="relative flex items-center justify-center">
+                            <input 
+                              type="number"
+                              value={item.capacity}
+                              onChange={(e) => {
+                                const val = e.target.value;
+                                setIntervalDeclarations(prev => prev.map(d => d.timeslot === item.timeslot ? { ...d, capacity: val } : d));
+                              }}
+                              className="w-full bg-white border border-gray-200 hover:border-gray-300 focus:border-teal-500 rounded px-2 py-1 text-center font-mono font-bold text-gray-800 text-xs focus:outline-none focus:ring-1 focus:ring-teal-500/25"
+                              placeholder="请输入报量"
+                            />
+                          </div>
+                        </td>
+                        <td className="py-1 px-2">
+                          <div className="relative flex items-center justify-center">
+                            <input 
+                              type="number"
+                              step="0.01"
+                              value={item.price}
+                              onChange={(e) => {
+                                const val = e.target.value;
+                                setIntervalDeclarations(prev => prev.map(d => d.timeslot === item.timeslot ? { ...d, price: val } : d));
+                              }}
+                              className={`w-full bg-white border rounded px-2 py-1 text-center font-mono font-bold text-xs focus:outline-none focus:ring-1 ${
+                                parseFloat(item.price) > selectedVppToConfirm.subsidyPrice 
+                                  ? "border-rose-300 text-rose-600 focus:border-rose-500 focus:ring-rose-500/25" 
+                                  : "border-gray-200 hover:border-gray-300 focus:border-teal-500 focus:ring-teal-500/25 text-gray-800"
+                              }`}
+                              placeholder="请输入报价"
+                            />
+                          </div>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+
+              {/* Reject Reason Textarea Section */}
+              <div className="space-y-1 bg-rose-50/30 rounded-lg p-3 border border-rose-100/50">
+                <label className="text-[10.5px] text-gray-500 font-bold flex justify-between px-0.5">
+                  <span>拒绝原因（拒绝邀约时必填）</span>
+                </label>
+                <textarea 
+                  value={reasonMsg}
+                  onChange={(e) => setReasonMsg(e.target.value)}
+                  placeholder="如需拒绝该邀约，请在此输入原因。例如：储能备电故障、生产高负荷状态..."
+                  rows={2}
+                  className="w-full bg-white border border-gray-200 rounded-lg p-2 text-xs focus:ring-1 focus:ring-rose-500 focus:outline-none focus:border-rose-500"
+                />
+              </div>
+            </div>
+            <div className="p-3.5 border-t border-gray-100 flex justify-end space-x-1.5 bg-gray-50/50">
+              <button 
+                onClick={() => { setSelectedVppToConfirm(null); setReasonMsg(""); }}
+                className="bg-white border border-gray-200 text-gray-500 hover:bg-gray-100 px-4 py-2 rounded-lg text-[11px] font-semibold cursor-pointer transition"
+              >
+                取消
+              </button>
+              <button 
+                onClick={handleVppReject}
+                className="bg-rose-600 hover:bg-rose-700 text-white font-bold px-4 py-2 rounded-lg text-[11px] shadow-sm cursor-pointer transition"
+              >
+                拒绝该邀约
+              </button>
+              <button 
+                onClick={handleVppActionConfirm}
+                className="bg-teal-600 hover:bg-teal-700 text-white font-bold px-4 py-2 rounded-lg text-[11px] shadow-sm cursor-pointer transition"
+              >
+                确认参与响应
+              </button>
+            </div>
           </div>
         </div>
       )}
