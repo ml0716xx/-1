@@ -75,6 +75,7 @@ export default function DemandResponse({
   const [formInviteDate, setFormInviteDate] = useState("2026-06-08");
   const [formStartTime, setFormStartTime] = useState("14:00");
   const [formEndTime, setFormEndTime] = useState("16:00");
+  const [formPeriods, setFormPeriods] = useState<string[]>(["14:00-16:00"]);
   const [formCapacity, setFormCapacity] = useState("");
   const [formPrice, setFormPrice] = useState("");
   const [formError, setFormError] = useState("");
@@ -88,6 +89,9 @@ export default function DemandResponse({
   const [reasonMsg, setReasonMsg] = useState("");
   const [declaredCapacity, setDeclaredCapacity] = useState("");
   const [declaredPrice, setDeclaredPrice] = useState("");
+
+  // Multiple response periods popover/modal state
+  const [periodsToShow, setPeriodsToShow] = useState<{ id: string; planName: string; date: string; periods: string[] } | null>(null);
 
   // Feedback Notification Message
   const [toastMessage, setToastMessage] = useState<{ type: "success" | "error" | "warning" | "info"; text: string } | null>(null);
@@ -133,8 +137,8 @@ export default function DemandResponse({
 
   // Handle Create Plan step 1 next
   const handlePlanNextStep = () => {
-    if (!formName || !formDate || !formStartTime || !formEndTime || !formCapacity || !formPrice) {
-      setFormError("请完整填写所有必填字段 (*)");
+    if (!formName || !formDate || formPeriods.length === 0 || !formCapacity || !formPrice) {
+      setFormError("请完整填写所有必填字段 (*)，且至少添加一个响应时段");
       return;
     }
     setFormError("");
@@ -143,12 +147,16 @@ export default function DemandResponse({
 
   // Handle Save Manual Plan
   const handleSaveManualPlan = () => {
+    if (formPeriods.length === 0) {
+      triggerToast("请添加至少一个响应时段！", "error");
+      return;
+    }
     const payload: DrPlan = {
       id: "plan_" + Date.now(),
       name: formName,
       type: DrPlanType.MANUAL,
       responseDate: formDate,
-      responsePeriod: `${formStartTime}-${formEndTime}`,
+      responsePeriod: formPeriods.join(", "),
       targetCapacity: parseFloat(formCapacity),
       baselineAvgLoad: 180.00, // mock baseline load
       baselineMaxLoad: 240.00,
@@ -163,7 +171,7 @@ export default function DemandResponse({
     );
 
     if (hasOverlap) {
-      triggerToast(`该时段已存在正在生效的需求响应计划，无法创建！`, "error");
+      triggerToast(`该时段与已生效的需求响应计划存在时间重叠，无法创建！`, "error");
       return;
     }
 
@@ -173,41 +181,63 @@ export default function DemandResponse({
     triggerToast(`成功手动制定削峰需求响应计划: ${payload.name}`, "success");
   };
 
-  // Helper: check time overlap "14:00-16:00" and "15:00-17:00"
+  // Helper: check time overlap between two period strings (which could contain multiple comma-separated periods)
   const isTimeOverlapping = (period1: string, period2: string): boolean => {
     try {
-      const [s1, e1] = period1.split("-").map(time => parseInt(time.replace(":", ""), 10));
-      const [s2, e2] = period2.split("-").map(time => parseInt(time.replace(":", ""), 10));
-      return (s1 < e2 && s2 < e1);
+      const parts1 = period1.split(/[,;\s]+/).map(p => p.trim()).filter(Boolean);
+      const parts2 = period2.split(/[,;\s]+/).map(p => p.trim()).filter(Boolean);
+      
+      const parseInterval = (part: string) => {
+        const [startStr, endStr] = part.split("-");
+        const [sH, sM] = startStr.split(":").map(Number);
+        const [eH, eM] = endStr.split(":").map(Number);
+        return { start: sH * 60 + sM, end: eH * 60 + eM };
+      };
+
+      const intervals1 = parts1.map(parseInterval);
+      const intervals2 = parts2.map(parseInterval);
+
+      for (const i1 of intervals1) {
+        for (const i2 of intervals2) {
+          if (i1.start < i2.end && i2.start < i1.end) {
+            return true;
+          }
+        }
+      }
+      return false;
     } catch {
       return false;
     }
   };
 
-  // Helper: split "HH:mm-HH:mm" into 15-minute intervals
+  // Helper: split "HH:mm-HH:mm" (possibly multiple, separated by commas) into 15-minute intervals
   const generate15MinIntervals = (responsePeriod: string): string[] => {
     try {
-      const [startStr, endStr] = responsePeriod.split("-");
-      const [startH, startM] = startStr.split(":").map(Number);
-      const [endH, endM] = endStr.split(":").map(Number);
+      const parts = responsePeriod.split(/[,;\s]+/).map(p => p.trim()).filter(Boolean);
+      const allIntervals: string[] = [];
       
-      let currentMin = startH * 60 + startM;
-      const endMin = endH * 60 + endM;
-      
-      const intervals: string[] = [];
-      while (currentMin + 15 <= endMin) {
-        const nextMin = currentMin + 15;
+      for (const part of parts) {
+        const [startStr, endStr] = part.split("-");
+        const [startH, startM] = startStr.split(":").map(Number);
+        const [endH, endM] = endStr.split(":").map(Number);
         
-        const formatTime = (min: number) => {
-          const h = Math.floor(min / 60).toString().padStart(2, "0");
-          const m = (min % 60).toString().padStart(2, "0");
-          return `${h}:${m}`;
-        };
+        let currentMin = startH * 60 + startM;
+        const endMin = endH * 60 + endM;
         
-        intervals.push(`${formatTime(currentMin)}-${formatTime(nextMin)}`);
-        currentMin = nextMin;
+        while (currentMin + 15 <= endMin) {
+          const nextMin = currentMin + 15;
+          
+          const formatTime = (min: number) => {
+            const h = Math.floor(min / 60).toString().padStart(2, "0");
+            const m = (min % 60).toString().padStart(2, "0");
+            return `${h}:${m}`;
+          };
+          
+          allIntervals.push(`${formatTime(currentMin)}-${formatTime(nextMin)}`);
+          currentMin = nextMin;
+        }
       }
-      return intervals;
+      return allIntervals;
     } catch {
       return [];
     }
@@ -219,6 +249,7 @@ export default function DemandResponse({
     setFormDate("");
     setFormStartTime("14:00");
     setFormEndTime("16:00");
+    setFormPeriods(["14:00-16:00"]);
     setFormCapacity("");
     setFormPrice("");
     setFormError("");
@@ -408,14 +439,18 @@ export default function DemandResponse({
       const finalCapacity = vpp.declaredCapacity || vpp.targetCapacity;
       const finalPrice = vpp.declaredPrice || vpp.subsidyPrice;
       // parse period
-      let hours = 2;
+      let hours = 0;
       try {
-        const [s, e] = vpp.responsePeriod.split("-").map(t => {
-          const [h, m] = t.split(":").map(Number);
-          return h + m / 60;
-        });
-        hours = e - s;
-      } catch {}
+        const parts = vpp.responsePeriod.split(/[,;\s]+/).map(p => p.trim()).filter(Boolean);
+        for (const part of parts) {
+          const [startStr, endStr] = part.split("-");
+          const [sh, sm] = startStr.split(":").map(Number);
+          const [eh, em] = endStr.split(":").map(Number);
+          hours += (eh * 60 + em - (sh * 60 + sm)) / 60;
+        }
+      } catch {
+        hours = 2;
+      }
       finalRevenue = finalCapacity * finalPrice * hours;
     }
 
@@ -459,7 +494,13 @@ export default function DemandResponse({
 
     // B. Copy active strategy of today & segment (时段分割)
     const originActiveGroup = strategyGroups.find(sg => sg.dateActive === "2026-06-08") || strategyGroups[strategyGroups.length - 1];
-    const [vppStart, vppEnd] = vpp.responsePeriod.split("-");
+    const periods = vpp.responsePeriod.split(/[,;\s]+/).map(p => p.trim()).filter(Boolean);
+    let vppStart = "14:00";
+    let vppEnd = "16:00";
+    if (periods.length > 0) {
+      vppStart = periods[0].split("-")[0];
+      vppEnd = periods[periods.length - 1].split("-")[1];
+    }
     
     const splitGroup: StrategyGroup = {
       id: "sg_vpp_split" + Date.now(),
@@ -674,7 +715,46 @@ export default function DemandResponse({
                           </span>
                         </td>
                         <td className="py-3 px-4 font-mono">{plan.responseDate}</td>
-                        <td className="py-3 px-4 font-mono text-gray-600">{plan.responsePeriod}</td>
+                        <td className="py-3 px-4 font-mono">
+                          {(() => {
+                            const periods = plan.responsePeriod.split(/[,;\s]+/).map(p => p.trim()).filter(Boolean);
+                            if (periods.length <= 3) {
+                              return (
+                                <div className="flex flex-wrap gap-1 max-w-[220px]">
+                                  {periods.map((p, idx) => (
+                                    <span key={idx} className="bg-gray-100 text-gray-700 px-1.5 py-0.5 rounded text-[10.5px] font-mono border border-gray-200">
+                                      {p}
+                                    </span>
+                                  ))}
+                                </div>
+                              );
+                            }
+                            return (
+                              <div className="flex flex-wrap items-center gap-1 max-w-[220px]">
+                                {periods.slice(0, 3).map((p, idx) => (
+                                  <span key={idx} className="bg-gray-100 text-gray-700 px-1.5 py-0.5 rounded text-[10.5px] font-mono border border-gray-200">
+                                    {p}
+                                  </span>
+                                ))}
+                                <button
+                                  type="button"
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    setPeriodsToShow({
+                                      id: plan.id,
+                                      planName: plan.name,
+                                      date: plan.responseDate,
+                                      periods: periods
+                                    });
+                                  }}
+                                  className="bg-teal-50 hover:bg-teal-100 text-teal-700 font-bold px-1.5 py-0.5 rounded text-[10px] border border-teal-200 transition cursor-pointer"
+                                >
+                                  + {periods.length - 3} 个
+                                </button>
+                              </div>
+                            );
+                          })()}
+                        </td>
                         <td className="py-3 px-4 text-right font-mono font-bold text-teal-800">{plan.targetCapacity.toFixed(2)}</td>
                         <td className="py-3 px-4 text-right font-mono text-gray-600">
                           {plan.baselineAvgLoad ? plan.baselineAvgLoad.toFixed(2) : "--"}
@@ -803,7 +883,30 @@ export default function DemandResponse({
                         <td className="py-3.5 px-4 font-mono font-bold text-gray-500">{vpp.id}</td>
                         <td className="py-3.5 px-4 max-w-[180px] truncate" title={vpp.planName}>{vpp.planName}</td>
                         <td className="py-3.5 px-4 font-mono">{vpp.responseDate}</td>
-                        <td className="py-3.5 px-4 font-mono">{vpp.responsePeriod}</td>
+                        <td className="py-3.5 px-4">
+                          {(() => {
+                            const periods = vpp.responsePeriod.split(/[,;\s]+/).map(p => p.trim()).filter(Boolean);
+                            return (
+                              <button
+                                type="button"
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  setPeriodsToShow({
+                                    id: vpp.id,
+                                    planName: vpp.planName,
+                                    date: vpp.responseDate,
+                                    periods: periods
+                                  });
+                                }}
+                                className="flex items-center space-x-1.5 bg-teal-50 hover:bg-teal-100/80 text-teal-800 border border-teal-100 px-2 py-1 rounded text-[11px] font-bold transition cursor-pointer"
+                                title="点击查看时段明细"
+                              >
+                                <Clock className="w-3.5 h-3.5 text-teal-600" />
+                                <span>共 {periods.length} 个时段</span>
+                              </button>
+                            );
+                          })()}
+                        </td>
                         <td className="py-3.5 px-4 text-right font-mono font-bold text-teal-800">{vpp.targetCapacity.toFixed(2)}</td>
                         <td className="py-3.5 px-4 text-right font-mono text-gray-600">￥{vpp.subsidyPrice.toFixed(2)}</td>
                         <td className="py-3.5 px-4 text-right font-mono text-indigo-700 font-bold">￥{vpp.refRevenue.toFixed(2)}</td>
@@ -982,24 +1085,95 @@ export default function DemandResponse({
                     />
                   </div>
 
-                  <div className="flex flex-col space-y-1">
-                    <label className="text-gray-600 font-bold flex items-center">
-                      <span className="text-rose-500 mr-1">*</span>响应时段
+                  <div className="flex flex-col space-y-1.5 col-span-2 bg-teal-50/20 p-3 rounded-lg border border-teal-500/10">
+                    <label className="text-gray-700 font-bold flex items-center justify-between">
+                      <span className="flex items-center text-xs">
+                        <span className="text-rose-500 mr-1">*</span>响应时段列表（支持多个非连续时段）
+                      </span>
+                      <span className="text-[10.5px] text-gray-400 font-normal">
+                        请添加至少一个时段
+                      </span>
                     </label>
-                    <div className="flex items-center space-x-1.5">
-                      <input 
-                        type="time" 
-                        value={formStartTime}
-                        onChange={(e) => setFormStartTime(e.target.value)}
-                        className="border border-gray-200 rounded-md px-2 py-1.5 focus:border-teal-500 focus:outline-none w-full font-mono text-center"
-                      />
-                      <span className="text-gray-400">至</span>
-                      <input 
-                        type="time" 
-                        value={formEndTime}
-                        onChange={(e) => setFormEndTime(e.target.value)}
-                        className="border border-gray-200 rounded-md px-2 py-1.5 focus:border-teal-500 focus:outline-none w-full font-mono text-center"
-                      />
+                    
+                    {/* Add new period input row */}
+                    <div className="flex items-center space-x-2 bg-white p-2 rounded-lg border border-gray-150">
+                      <div className="flex items-center space-x-1 flex-grow text-xs">
+                        <span className="text-gray-400 font-medium">开始:</span>
+                        <input 
+                          type="time" 
+                          value={formStartTime}
+                          onChange={(e) => setFormStartTime(e.target.value)}
+                          className="border border-gray-200 hover:border-teal-500 focus:border-teal-600 rounded-md px-1.5 py-1 focus:outline-none font-mono text-center text-xs w-24 bg-gray-50/50"
+                        />
+                        <span className="text-gray-400 font-medium ml-1">结束:</span>
+                        <input 
+                          type="time" 
+                          value={formEndTime}
+                          onChange={(e) => setFormEndTime(e.target.value)}
+                          className="border border-gray-200 hover:border-teal-500 focus:border-teal-600 rounded-md px-1.5 py-1 focus:outline-none font-mono text-center text-xs w-24 bg-gray-50/50"
+                        />
+                      </div>
+                      
+                      <button
+                        type="button"
+                        onClick={() => {
+                          if (!formStartTime || !formEndTime) {
+                            triggerToast("请选择开始和结束时间！", "error");
+                            return;
+                          }
+                          const [sh, sm] = formStartTime.split(":").map(Number);
+                          const [eh, em] = formEndTime.split(":").map(Number);
+                          if (sh * 60 + sm >= eh * 60 + em) {
+                            triggerToast("结束时间必须晚于开始时间！", "error");
+                            return;
+                          }
+                          const newPeriod = `${formStartTime}-${formEndTime}`;
+                          
+                          // Check overlap
+                          const isOverlap = isTimeOverlapping(newPeriod, formPeriods.join(", "));
+                          if (isOverlap) {
+                            triggerToast(`该时段与已添加的时段存在时间重叠！`, "error");
+                            return;
+                          }
+                          
+                          setFormPeriods(prev => [...prev, newPeriod].sort((a, b) => {
+                            const [sa] = a.split("-");
+                            const [sb] = b.split("-");
+                            return sa.localeCompare(sb);
+                          }));
+                          triggerToast("成功添加响应时段", "success");
+                        }}
+                        className="bg-teal-600 hover:bg-teal-700 text-white font-bold px-3 py-1 rounded text-xs transition cursor-pointer"
+                      >
+                        + 添加时段
+                      </button>
+                    </div>
+
+                    {/* Display of currently added periods */}
+                    <div className="flex flex-wrap gap-1.5 min-h-[38px] bg-white border border-gray-200 rounded-lg p-2">
+                      {formPeriods.length === 0 ? (
+                        <span className="text-gray-400 italic text-[11px] self-center pl-1">暂无时段，请于上方选择并点击“添加时段”</span>
+                      ) : (
+                        formPeriods.map((period, index) => (
+                          <div 
+                            key={index}
+                            className="flex items-center space-x-1 bg-teal-50 hover:bg-teal-100 border border-teal-200 text-teal-900 font-mono font-bold px-2 py-0.5 rounded text-[11px] transition duration-150 animate-fade-in"
+                          >
+                            <span>{period}</span>
+                            <button
+                              type="button"
+                              onClick={() => {
+                                setFormPeriods(prev => prev.filter((_, i) => i !== index));
+                                triggerToast("已移除该时段", "info");
+                              }}
+                              className="text-teal-600 hover:text-rose-600 p-0.5 rounded hover:bg-white/50 cursor-pointer transition"
+                              title="移除"
+                            >
+                              <X className="w-3 h-3" />
+                            </button>
+                          </div>
+                        ))
+                      )}
                     </div>
                   </div>
                   <div className="flex flex-col space-y-1">
@@ -1015,7 +1189,7 @@ export default function DemandResponse({
                     />
                   </div>
 
-                  <div className="flex flex-col space-y-1 col-span-2">
+                  <div className="flex flex-col space-y-1">
                     <label className="text-gray-600 font-bold flex items-center">
                       <span className="text-rose-500 mr-1">*</span>补贴价格 (元/kWh)
                     </label>
@@ -1037,7 +1211,7 @@ export default function DemandResponse({
                   <div>
                     <h4 className="font-bold">EMS 策略发布安全性约束与核发声明</h4>
                     <p className="text-gray-600 mt-1 leading-relaxed">
-                      自主新增削峰需求响应策略在执行期间将以「最高级别」发布至站点储能系统，在 {formDate} 的 {formStartTime}-{formEndTime} 时段内对负荷做出物理压制，请确保该期间储能设备拥有充足的放电 SOC，并在负荷平移前仔细比对物理极限。
+                      自主新增削峰需求响应策略在执行期间将以「最高级别」发布至站点储能系统，在 {formDate} 的 {formPeriods.join("、")} 时段内对负荷做出物理压制，请确保该期间储能设备拥有充足的放电 SOC，并在负荷平移前仔细比对物理极限。
                     </p>
                   </div>
                 </div>
@@ -1055,26 +1229,47 @@ export default function DemandResponse({
                       <span className="text-gray-400">响应日期</span>
                       <span className="text-gray-850 font-mono">{formDate}</span>
                     </div>
-                    <div className="flex justify-between border-b border-gray-50 pb-1.5">
-                      <span className="text-gray-400">响应时间段</span>
-                      <span className="text-gray-850 font-mono">{formStartTime} - {formEndTime}</span>
+                    <div className="flex justify-between items-start border-b border-gray-50 pb-1.5 col-span-2">
+                      <span className="text-gray-400">响应时间段 ({formPeriods.length} 个)</span>
+                      <div className="flex flex-wrap gap-1 justify-end max-w-[400px]">
+                        {formPeriods.map((p, idx) => (
+                          <span key={idx} className="bg-teal-50 border border-teal-100 text-teal-850 font-mono font-bold px-2 py-0.5 rounded text-[10.5px]">
+                            {p}
+                          </span>
+                        ))}
+                      </div>
                     </div>
-                    <div className="flex justify-between border-b border-gray-50 pb-1.5 pl-4">
+                    <div className="flex justify-between border-b border-gray-50 pb-1.5">
                       <span className="text-gray-400">目标削峰负荷</span>
                       <span className="text-teal-700 font-bold font-mono">{formCapacity} kW</span>
+                    </div>
+                    <div className="flex justify-between border-b border-gray-50 pb-1.5 pl-4">
+                      <span className="text-gray-400">目标执行宿主</span>
+                      <span className="text-gray-800">{selectedSite.name}</span>
                     </div>
                     <div className="flex justify-between border-b border-gray-50 pb-1.5 col-span-2">
                       <span className="text-gray-400">补贴单价 / 预估参考收益</span>
                       <span className="text-amber-700 font-bold">
                         ￥{parseFloat(formPrice || "0").toFixed(2)} 元/kWh 
                         <span className="text-[10px] text-gray-400 font-normal ml-1">
-                          (预计得: ￥{(parseFloat(formCapacity || "0") * parseFloat(formPrice || "0") * 2).toFixed(2)})
+                          (预计得: ￥{(
+                            parseFloat(formCapacity || "0") * 
+                            parseFloat(formPrice || "0") * 
+                            (() => {
+                              let hours = 0;
+                              try {
+                                for (const part of formPeriods) {
+                                  const [startStr, endStr] = part.split("-");
+                                  const [sh, sm] = startStr.split(":").map(Number);
+                                  const [eh, em] = endStr.split(":").map(Number);
+                                  hours += (eh * 60 + em - (sh * 60 + sm)) / 60;
+                                }
+                              } catch {}
+                              return hours || 2;
+                            })()
+                          ).toFixed(2)})
                         </span>
                       </span>
-                    </div>
-                    <div className="flex justify-between border-b border-gray-50 pb-1.5 pl-4 col-span-2">
-                      <span className="text-gray-400">目标执行宿主</span>
-                      <span className="text-gray-800">{selectedSite.name}</span>
                     </div>
                   </div>
                 </div>
@@ -1261,7 +1456,16 @@ export default function DemandResponse({
                   <div className="flex justify-between"><span className="text-gray-400">计划名称:</span><span className="text-gray-800 font-bold">{selectedPlanDetail.name}</span></div>
                   <div className="flex justify-between"><span className="text-gray-400">计划形式:</span><span className="text-gray-800 px-1.5 py-0.2 bg-teal-50 text-teal-700 font-bold rounded">{selectedPlanDetail.type}</span></div>
                   <div className="flex justify-between"><span className="text-gray-400">响应日期:</span><span className="text-gray-800 font-mono">{selectedPlanDetail.responseDate}</span></div>
-                  <div className="flex justify-between"><span className="text-gray-400">响应时段:</span><span className="text-gray-800 font-mono">{selectedPlanDetail.responsePeriod}</span></div>
+                  <div className="flex justify-between items-start gap-2">
+                    <span className="text-gray-400 whitespace-nowrap">响应时段:</span>
+                    <div className="flex flex-wrap gap-1 justify-end max-w-[180px]">
+                      {selectedPlanDetail.responsePeriod.split(/[,;\s]+/).map(p => p.trim()).filter(Boolean).map((p, idx) => (
+                        <span key={idx} className="bg-white border border-gray-200 text-gray-700 px-1 py-0.2 rounded text-[10px] font-mono font-bold">
+                          {p}
+                        </span>
+                      ))}
+                    </div>
+                  </div>
                   <div className="flex justify-between"><span className="text-gray-400">目标削减负荷:</span><span className="text-teal-800 font-mono font-bold">{selectedPlanDetail.targetCapacity} kW</span></div>
                 </div>
 
@@ -1349,6 +1553,69 @@ export default function DemandResponse({
                 className="bg-teal-600 hover:bg-teal-700 text-white font-bold px-4 py-2 rounded-lg text-xs cursor-pointer shadow"
               >
                 我知道了
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Multiple Response Periods Modal */}
+      {periodsToShow && (
+        <div className="fixed inset-0 bg-gray-900/40 backdrop-blur-xs flex items-center justify-center z-50 animate-fade-in font-sans">
+          <div className="bg-white rounded-xl shadow-2xl border border-gray-100 w-full max-w-md overflow-hidden">
+            <div className="p-4 border-b border-gray-100 flex items-center justify-between bg-teal-900 text-white">
+              <span className="font-bold flex items-center space-x-2">
+                <Clock className="w-4 h-4" />
+                <span>邀约响应时段明细</span>
+              </span>
+              <button 
+                onClick={() => setPeriodsToShow(null)}
+                className="p-1 rounded-full hover:bg-teal-800 text-teal-100 cursor-pointer"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            <div className="p-5 space-y-4 text-xs font-sans">
+              <div className="bg-gray-50 rounded-lg p-3 space-y-2 border border-gray-100">
+                <div className="flex justify-between">
+                  <span className="text-gray-400 font-medium">邀约 ID:</span>
+                  <span className="text-gray-800 font-mono font-bold">{periodsToShow.id}</span>
+                </div>
+                <div className="flex justify-between">
+                  <span className="text-gray-400 font-medium">计划名称:</span>
+                  <span className="text-gray-800 font-bold text-right max-w-[240px] truncate" title={periodsToShow.planName}>
+                    {periodsToShow.planName}
+                  </span>
+                </div>
+                <div className="flex justify-between">
+                  <span className="text-gray-400 font-medium">响应日期:</span>
+                  <span className="text-gray-800 font-mono font-bold">{periodsToShow.date}</span>
+                </div>
+              </div>
+
+              <div className="space-y-2">
+                <span className="font-bold text-gray-700 block">所有响应时段 ({periodsToShow.periods.length} 个)</span>
+                <div className="grid grid-cols-2 gap-2 max-h-[220px] overflow-y-auto pr-1">
+                  {periodsToShow.periods.map((p, i) => (
+                    <div 
+                      key={i} 
+                      className="bg-teal-50/50 border border-teal-100/60 hover:border-teal-300 rounded-lg py-2 px-3 font-mono text-center text-xs font-bold text-teal-950 flex items-center justify-center space-x-1.5 transition"
+                    >
+                      <Clock className="w-3.5 h-3.5 text-teal-600 flex-shrink-0" />
+                      <span>{p}</span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            </div>
+
+            <div className="p-3.5 border-t border-gray-100 flex justify-end bg-gray-50/50">
+              <button 
+                onClick={() => setPeriodsToShow(null)}
+                className="bg-teal-600 hover:bg-teal-700 text-white font-bold px-4 py-2 rounded-lg text-xs cursor-pointer shadow-sm transition"
+              >
+                关闭
               </button>
             </div>
           </div>

@@ -61,9 +61,9 @@ export const initialVppInvitations: VppInvitation[] = [
   {
     id: "VPP-2026-004",
     source: "华东电力调峰 VPP",
-    planName: "华东电力调峰 VPP_2026-06-12_09:00-11:30",
+    planName: "华东电力调峰 VPP_2026-06-12_多时段响应邀约",
     responseDate: "2026-06-12",
-    responsePeriod: "09:00-11:30",
+    responsePeriod: "09:00-09:30, 09:45-10:15, 10:30-11:00, 11:15-11:45, 12:00-12:30",
     targetCapacity: 100.00,
     subsidyPrice: 1.80,
     refRevenue: 450.00, // 100kW * 1.8元 * 2.5小时
@@ -163,7 +163,7 @@ export const initialDrPlans: DrPlan[] = [
     name: "迎峰度夏自主削峰响应计划01",
     type: DrPlanType.MANUAL,
     responseDate: "2026-06-15",
-    responsePeriod: "13:00-15:00",
+    responsePeriod: "10:00-11:30, 14:00-15:30, 16:00-17:00, 19:00-20:00",
     targetCapacity: 80.00,
     baselineAvgLoad: 310.00,
     baselineMaxLoad: 420.00,
